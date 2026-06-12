@@ -180,7 +180,7 @@ async def availability(req: RetellFunctionCall):
     return {
         "available": len(top3) > 0,
         "exact_match": exact_match,
-        "slots": [iso for iso, d in top3],
+        "slots": [d.isoformat() for iso, d in top3],   # Phoenix local w/ -07:00 offset
         "spoken": "; ".join(d.strftime("%A, %B %-d at %-I:%M %p") for iso, d in top3)
             if top3 else "I don't have any open slots in that range.",
     }
@@ -191,19 +191,33 @@ async def book(req: RetellFunctionCall):
     practice_id = req.args.get("practice_id", "sunset")
     slot_iso = req.args.get("slot_iso")
     patient_name = req.args.get("patient_name", "Patient")
-    patient_phone = req.args.get("patient_phone", "")
     service = req.args.get("service", "appointment")
     is_new_patient = req.args.get("is_new_patient", True)
+
+    # Caller ID is the source of truth for the phone, always.
+    call_from = (req.call or {}).get("from_number", "")
+    raw_phone = str(req.args.get("patient_phone", "")).strip()
+    patient_phone = call_from or (raw_phone if re.fullmatch(r"\+\d{10,15}", raw_phone) else "")
+
+    # Normalize slot_iso to UTC regardless of how the agent formatted it.
+    try:
+        dt = datetime.fromisoformat(slot_iso.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=PHX)   # naive timestamps are assumed Phoenix local
+        start_utc = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    except (ValueError, AttributeError):
+        return {"success": False, "reason": "bad_slot",
+                "message": "That time format was invalid. Re-check availability and use a slot exactly as returned."}
 
     practice = get_practice(practice_id)
 
     payload = {
         "eventTypeId": CAL_EVENT_TYPE_ID,
-        "start": slot_iso,
+        "start": start_utc,
         "attendee": {
             "name": patient_name,
-            "email": f"{patient_phone.replace('+', '')}@chairside.ai",
-            "phoneNumber": patient_phone,
+            "email": f"{patient_phone.replace('+', '') or 'unknown'}@chairside.ai",
+            "phoneNumber": patient_phone or None,
             "timeZone": "America/Phoenix",
         },
         "metadata": {"service": service, "new_patient": str(is_new_patient)},
@@ -214,36 +228,39 @@ async def book(req: RetellFunctionCall):
 
     if r.status_code not in (200, 201):
         print(f"Cal.com booking failed: {r.status_code} - {r.text}")
-        return {
-            "success": False,
-            "reason": "slot_unavailable",
-            "message": "That slot is no longer available. Please offer fresh times.",
-        }
+        return {"success": False, "reason": "slot_unavailable",
+                "message": "That slot is no longer available. Call check_availability for fresh times."}
 
     booking = r.json().get("data", {})
     cal_booking_id = booking.get("uid") or booking.get("id")
 
+    dt_phx = dt.astimezone(PHX)
+    when = dt_phx.strftime("%A, %B %-d at %-I:%M %p")
+
+    # After Cal commits, NOTHING below may crash the response. Log-and-continue.
     if practice:
-        supabase.table("bookings").insert({
-            "practice_id": practice["id"],
-            "cal_booking_id": str(cal_booking_id),
-            "patient_name": patient_name,
-            "patient_phone": patient_phone,
-            "appointment_datetime": slot_iso,
-            "service": service,
-            "confirmation_sms_sent": True,
-        }).execute()
+        try:
+            supabase.table("bookings").insert({
+                "practice_id": practice["id"],
+                "cal_booking_id": str(cal_booking_id),
+                "patient_name": patient_name,
+                "patient_phone": patient_phone,
+                "appointment_datetime": start_utc,
+                "service": service,
+                "confirmation_sms_sent": bool(patient_phone),
+            }).execute()
+        except Exception as e:
+            print(f"WARNING: bookings insert failed after Cal commit: {e}")
+    else:
+        print(f"WARNING: get_practice() found nothing for '{practice_id}' - booking row not saved")
 
-    if not practice:
-        print(f"WARNING: get_practice() found nothing for '{practice_id}' — handoff NOT saved")
-
-    dt = datetime.fromisoformat(slot_iso.replace("Z", "+00:00")).astimezone(PHX)
-    when = dt.strftime("%A, %B %-d at %-I:%M %p")
-    pname = practice["name"] if practice else "our office"
-    await send_sms(
-        patient_phone,
-        f"You're booked at {pname} for {when}. Reply STOP to opt out.",
-    )
+    if patient_phone:
+        try:
+            pname = practice["name"] if practice else "our office"
+            await send_sms(patient_phone,
+                f"You're booked at {pname} for {when}. Reply STOP to opt out.")
+        except Exception as e:
+            print(f"WARNING: confirmation SMS failed: {e}")
 
     return {"success": True, "booking_id": str(cal_booking_id), "when": when}
 
