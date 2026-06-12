@@ -99,15 +99,15 @@ class RetellFunctionCall(BaseModel):
 
 
 # --- Endpoints ---
-@app.get("/")
-def health():
-    return {"status": "ok", "service": "chairside-booking-api"}
-
 
 @app.post("/api/availability")
-async def availability(req: AvailabilityRequest):
+async def availability(req: RetellFunctionCall):
+    practice_id = req.args.get("practice_id", "sunset")
+    preference = req.args.get("preference", "any time")
+    days_ahead = req.args.get("days_ahead", 14)
+
     start = datetime.now(timezone.utc)
-    end = start + timedelta(days=req.days_ahead or 14)
+    end = start + timedelta(days=days_ahead)
 
     params = {
         "eventTypeId": CAL_EVENT_TYPE_ID,
@@ -137,67 +137,59 @@ async def availability(req: AvailabilityRequest):
     }
 
 
-def _format_slots_for_speech(slots):
-    """Turn ISO timestamps into natural language for the voice agent."""
-    if not slots:
-        return "I don't have any open slots in that range."
-    out = []
-    for iso in slots:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        out.append(dt.strftime("%A, %B %-d at %-I:%M %p"))
-    return "; ".join(out)
-
-
 @app.post("/api/book")
-async def book(req: BookRequest):
-    practice = get_practice(req.practice_id)
+async def book(req: RetellFunctionCall):
+    practice_id = req.args.get("practice_id", "sunset")
+    slot_iso = req.args.get("slot_iso")
+    patient_name = req.args.get("patient_name", "Patient")
+    patient_phone = req.args.get("patient_phone", "")
+    service = req.args.get("service", "appointment")
+    is_new_patient = req.args.get("is_new_patient", True)
+
+    practice = get_practice(practice_id)
 
     payload = {
-    "eventTypeId": CAL_EVENT_TYPE_ID,
-    "start": req.slot_iso,
-    "attendee": {
-        "name": req.patient_name,
-        "email": f"{req.patient_phone.replace('+', '')}@chairside.ai",
-        "phoneNumber": req.patient_phone,
-        "timeZone": "America/Phoenix",
-    },
-    "metadata": {"service": req.service, "new_patient": str(req.is_new_patient)},
-}
-    
+        "eventTypeId": CAL_EVENT_TYPE_ID,
+        "start": slot_iso,
+        "attendee": {
+            "name": patient_name,
+            "email": f"{patient_phone.replace('+', '')}@chairside.ai",
+            "phoneNumber": patient_phone,
+            "timeZone": "America/Phoenix",
+        },
+        "metadata": {"service": service, "new_patient": str(is_new_patient)},
+    }
+
     async with httpx.AsyncClient() as client:
         r = await client.post(f"{CAL_BASE}/bookings", headers=CAL_HEADERS_BOOKINGS, json=payload)
 
     if r.status_code not in (200, 201):
-    # Log the real reason so we can debug
         print(f"Cal.com booking failed: {r.status_code} - {r.text}")
         return {
-        "success": False,
-        "reason": "slot_unavailable",
-        "message": "That slot is no longer available. Please offer fresh times.",
-        "debug": r.text,  # temporary, remove after debugging
+            "success": False,
+            "reason": "slot_unavailable",
+            "message": "That slot is no longer available. Please offer fresh times.",
         }
 
     booking = r.json().get("data", {})
     cal_booking_id = booking.get("uid") or booking.get("id")
 
-    # Log to Supabase
     if practice:
         supabase.table("bookings").insert({
             "practice_id": practice["id"],
             "cal_booking_id": str(cal_booking_id),
-            "patient_name": req.patient_name,
-            "patient_phone": req.patient_phone,
-            "appointment_datetime": req.slot_iso,
-            "service": req.service,
+            "patient_name": patient_name,
+            "patient_phone": patient_phone,
+            "appointment_datetime": slot_iso,
+            "service": service,
             "confirmation_sms_sent": True,
         }).execute()
 
-    # Send confirmation SMS
-    dt = datetime.fromisoformat(req.slot_iso.replace("Z", "+00:00"))
+    dt = datetime.fromisoformat(slot_iso.replace("Z", "+00:00"))
     when = dt.strftime("%A, %B %-d at %-I:%M %p")
     pname = practice["name"] if practice else "our office"
     await send_sms(
-        req.patient_phone,
+        patient_phone,
         f"You're booked at {pname} for {when}. Reply STOP to opt out.",
     )
 
@@ -205,23 +197,28 @@ async def book(req: BookRequest):
 
 
 @app.post("/api/handoff")
-async def handoff(req: HandoffRequest):
-    practice = get_practice(req.practice_id)
+async def handoff(req: RetellFunctionCall):
+    practice_id = req.args.get("practice_id", "sunset")
+    patient_name = req.args.get("patient_name", "Unknown")
+    patient_phone = req.args.get("patient_phone", "")
+    topic = req.args.get("topic", "general inquiry")
+    is_urgent = req.args.get("is_urgent", False)
+
+    practice = get_practice(practice_id)
 
     if practice:
         supabase.table("handoffs").insert({
             "practice_id": practice["id"],
-            "patient_name": req.patient_name,
-            "patient_phone": req.patient_phone,
-            "topic": req.topic,
+            "patient_name": patient_name,
+            "patient_phone": patient_phone,
+            "topic": topic,
             "owner_notified": True,
         }).execute()
 
-        # Alert the owner via SMS
-        urgency = "URGENT — " if req.is_urgent else ""
+        urgency = "URGENT — " if is_urgent else ""
         await send_sms(
             practice["owner_sms"],
-            f"{urgency}Caller {req.patient_name} ({req.patient_phone}) asked about: {req.topic}. Please call back.",
+            f"{urgency}Caller {patient_name} ({patient_phone}) asked about: {topic}. Please call back.",
         )
 
     return {"success": True, "message": "The team will call you back shortly."}
