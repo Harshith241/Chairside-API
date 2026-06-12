@@ -252,9 +252,19 @@ async def book(req: RetellFunctionCall):
 async def handoff(req: RetellFunctionCall):
     practice_id = req.args.get("practice_id", "sunset")
     patient_name = req.args.get("patient_name", "Unknown")
-    patient_phone = req.args.get("patient_phone", "")
     topic = req.args.get("topic", "general inquiry")
     is_urgent = req.args.get("is_urgent", False)
+
+    # Phone source of truth: the actual caller ID from the call.
+    # Only trust the LLM's value if it's a real E.164 number AND no caller ID exists.
+    call_from = (req.call or {}).get("from_number", "")
+    raw_phone = str(req.args.get("patient_phone", "")).strip()
+    if call_from:
+        patient_phone = call_from
+    elif re.fullmatch(r"\+\d{10,15}", raw_phone):
+        patient_phone = raw_phone
+    else:
+        patient_phone = "unknown"
 
     practice = get_practice(practice_id)
 
@@ -267,14 +277,14 @@ async def handoff(req: RetellFunctionCall):
             "owner_notified": True,
         }).execute()
 
-        urgency = "URGENT — " if is_urgent else ""
+        urgency = "URGENT - " if is_urgent else ""
         await send_sms(
             practice["owner_sms"],
             f"{urgency}Caller {patient_name} ({patient_phone}) asked about: {topic}. Please call back.",
         )
-    
+
     if not practice:
-        print(f"WARNING: get_practice() found nothing for '{practice_id}' — handoff NOT saved")
+        print(f"WARNING: get_practice() found nothing for '{practice_id}' - handoff NOT saved")
 
     return {"success": True, "message": "The team will call you back shortly."}
 
