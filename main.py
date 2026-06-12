@@ -100,6 +100,18 @@ class RetellFunctionCall(BaseModel):
 
 # --- Endpoints ---
 
+def _format_slots_for_speech(slots):
+    """Turn ISO timestamps into natural language for the voice agent."""
+    if not slots:
+        return "I don't have any open slots in that range."
+    out = []
+    for iso in slots:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        out.append(dt.strftime("%A, %B %-d at %-I:%M %p"))
+    return "; ".join(out)
+
+
+
 @app.post("/api/availability")
 async def availability(req: RetellFunctionCall):
     practice_id = req.args.get("practice_id", "sunset")
