@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 import httpx
@@ -262,3 +262,42 @@ async def handoff(req: RetellFunctionCall):
         )
 
     return {"success": True, "message": "The team will call you back shortly."}
+
+
+@app.post("/api/retell-inbound")
+async def retell_inbound(request: Request):
+    body = await request.json()
+    inbound = body.get("call_inbound", {})
+    to_number = inbound.get("to_number", "")
+
+    res = supabase.table("practices").select("*").eq("retell_number", to_number).execute()
+    if not res.data:
+        # Unknown number: let the call proceed with safe defaults
+        return {"call_inbound": {"dynamic_variables": {
+            "practice_name": "the dental office",
+            "practice_id": "unknown",
+            "practice_timezone": "America/Phoenix",
+        }}}
+
+    p = res.data[0]
+
+    prices = p.get("published_prices") or {}
+    prices_text = "\n".join(f"- {k}: {v}" for k, v in prices.items()) or "No published prices."
+
+    hours = p.get("hours") or {}
+    hours_text = "; ".join(f"{k}: {v}" for k, v in hours.items()) if isinstance(hours, dict) else str(hours)
+
+    services = p.get("services_offered") or []
+    insurance = p.get("insurance_accepted") or []
+
+    return {"call_inbound": {"dynamic_variables": {
+        "practice_id": p["id"],
+        "practice_name": p["name"],
+        "practice_address": p.get("address") or "",
+        "hours": hours_text,
+        "services_offered": ", ".join(services),
+        "published_prices": prices_text,
+        "insurance_accepted_list": ", ".join(insurance),
+        "emergency_protocol": p.get("emergency_protocol") or "Ask the caller to seek emergency care if severe.",
+        "practice_timezone": p.get("timezone") or "America/Phoenix",
+    }}}
