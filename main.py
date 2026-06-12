@@ -7,6 +7,7 @@ import httpx
 from supabase import create_client
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
+import re
 
 load_dotenv()
 
@@ -45,18 +46,26 @@ TWILIO_FROM = env("TWILIO_FROM_NUMBER")
 
 
 # --- Helpers ---
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
 def get_practice(practice_id: str):
-    """Look up a practice. For v1, fall back to name match if not a UUID."""
-    try:
-        res = supabase.table("practices").select("*").eq("id", practice_id).execute()
+    pid = str(practice_id or "").strip()
+
+    # 1) Real UUID (what the inbound-webhook prompt passes)
+    if UUID_RE.match(pid):
+        res = supabase.table("practices").select("*").eq("id", pid).execute()
         if res.data:
             return res.data[0]
-    except Exception:
-        pass  # not a valid UUID, fall through to name match
 
-    # Fallback: match by name (case-insensitive)
-    res = supabase.table("practices").select("*").ilike("name", f"%{practice_id}%").execute()
-    return res.data[0] if res.data else None
+    # 2) Slug or name fragment: "sunset-family-dental", "sunset", "Sunset Family Dental"
+    needle = pid.replace("-", " ").lower()
+    res = supabase.table("practices").select("*").execute()
+    for p in res.data:
+        name = p["name"].lower()
+        if needle and (needle in name or name in needle):
+            return p
+
+    return None
 
 
 async def send_sms(to: str, body: str):
@@ -225,6 +234,9 @@ async def book(req: RetellFunctionCall):
             "confirmation_sms_sent": True,
         }).execute()
 
+    if not practice:
+        print(f"WARNING: get_practice() found nothing for '{practice_id}' — handoff NOT saved")
+
     dt = datetime.fromisoformat(slot_iso.replace("Z", "+00:00")).astimezone(PHX)
     when = dt.strftime("%A, %B %-d at %-I:%M %p")
     pname = practice["name"] if practice else "our office"
@@ -260,6 +272,9 @@ async def handoff(req: RetellFunctionCall):
             practice["owner_sms"],
             f"{urgency}Caller {patient_name} ({patient_phone}) asked about: {topic}. Please call back.",
         )
+    
+    if not practice:
+        print(f"WARNING: get_practice() found nothing for '{practice_id}' — handoff NOT saved")
 
     return {"success": True, "message": "The team will call you back shortly."}
 
