@@ -11,10 +11,18 @@ load_dotenv()
 
 app = FastAPI(title="Chairside Booking API")
 
-# --- Config ---
-CAL_API_KEY = os.environ["CAL_API_KEY"]
-CAL_EVENT_TYPE_ID = int(os.environ["CAL_EVENT_TYPE_ID"])
+# --- Config (defensive) ---
+def env(key: str, default=None, required=False):
+    val = os.environ.get(key, default)
+    if required and not val:
+        print(f"WARNING: env var {key} is missing")
+    return val
+
+CAL_API_KEY = env("CAL_API_KEY", required=True)
+CAL_EVENT_TYPE_ID_RAW = env("CAL_EVENT_TYPE_ID", default="0")
+CAL_EVENT_TYPE_ID = int(CAL_EVENT_TYPE_ID_RAW) if CAL_EVENT_TYPE_ID_RAW.isdigit() else 0
 CAL_BASE = "https://api.cal.com/v2"
+
 CAL_HEADERS_SLOTS = {
     "Authorization": f"Bearer {CAL_API_KEY}",
     "cal-api-version": "2024-09-04",
@@ -26,14 +34,13 @@ CAL_HEADERS_BOOKINGS = {
     "Content-Type": "application/json",
 }
 
-supabase = create_client(
-    os.environ["SUPABASE_URL"],
-    os.environ["SUPABASE_SERVICE_KEY"],
-)
+SUPABASE_URL = env("SUPABASE_URL", required=True)
+SUPABASE_SERVICE_KEY = env("SUPABASE_SERVICE_KEY", required=True)
+supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY) if SUPABASE_URL and SUPABASE_SERVICE_KEY else None
 
-TWILIO_SID = os.environ["TWILIO_ACCOUNT_SID"]
-TWILIO_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
-TWILIO_FROM = os.environ["TWILIO_FROM_NUMBER"]
+TWILIO_SID = env("TWILIO_ACCOUNT_SID")
+TWILIO_TOKEN = env("TWILIO_AUTH_TOKEN")
+TWILIO_FROM = env("TWILIO_FROM_NUMBER")
 
 
 # --- Helpers ---
