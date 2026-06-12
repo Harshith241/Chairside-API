@@ -6,6 +6,7 @@ from typing import Optional
 import httpx
 from supabase import create_client
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
 load_dotenv()
 
@@ -69,6 +70,8 @@ async def send_sms(to: str, body: str):
         )
 
 
+
+
 # --- Models ---
 class AvailabilityRequest(BaseModel):
     practice_id: str
@@ -100,13 +103,14 @@ class RetellFunctionCall(BaseModel):
 
 # --- Endpoints ---
 
+PHX = ZoneInfo("America/Phoenix")
+
 def _format_slots_for_speech(slots):
-    """Turn ISO timestamps into natural language for the voice agent."""
     if not slots:
         return "I don't have any open slots in that range."
     out = []
     for iso in slots:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(PHX)
         out.append(dt.strftime("%A, %B %-d at %-I:%M %p"))
     return "; ".join(out)
 
@@ -197,7 +201,7 @@ async def book(req: RetellFunctionCall):
             "confirmation_sms_sent": True,
         }).execute()
 
-    dt = datetime.fromisoformat(slot_iso.replace("Z", "+00:00"))
+    dt = datetime.fromisoformat(slot_iso.replace("Z", "+00:00")).astimezone(PHX)
     when = dt.strftime("%A, %B %-d at %-I:%M %p")
     pname = practice["name"] if practice else "our office"
     await send_sms(
