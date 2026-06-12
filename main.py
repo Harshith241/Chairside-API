@@ -92,6 +92,11 @@ class HandoffRequest(BaseModel):
     topic: str
     is_urgent: Optional[bool] = False
 
+class RetellFunctionCall(BaseModel):
+    call: Optional[dict] = None
+    name: Optional[str] = None
+    args: dict
+
 
 # --- Endpoints ---
 @app.get("/")
