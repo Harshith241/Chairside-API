@@ -118,8 +118,8 @@ def _format_slots_for_speech(slots):
 
 @app.post("/api/availability")
 async def availability(req: RetellFunctionCall):
-    practice_id = req.args.get("practice_id", "sunset")
-    preference = req.args.get("preference", "any time")
+    preferred_date = req.args.get("preferred_date")   # "2026-06-15" or None
+    time_of_day = req.args.get("time_of_day")          # "morning" / "afternoon" / None
     days_ahead = req.args.get("days_ahead", 14)
 
     start = datetime.now(timezone.utc)
@@ -139,17 +139,41 @@ async def availability(req: RetellFunctionCall):
 
     data = r.json()
     slots_by_date = data.get("data", {})
-    flat = []
+
+    # Pair each UTC ISO string (needed for booking) with its Phoenix datetime (for filtering/speech)
+    pairs = []
     for date, slots in slots_by_date.items():
         for s in slots:
-            flat.append(s.get("start"))
+            iso = s.get("start")
+            phx_dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(PHX)
+            pairs.append((iso, phx_dt))
 
-    top3 = flat[:3]
+    # Filter by requested date / time of day (in Phoenix time)
+    filtered = pairs
+    if preferred_date:
+        try:
+            target = datetime.fromisoformat(preferred_date).date()
+            filtered = [(iso, d) for iso, d in filtered if d.date() == target]
+        except ValueError:
+            pass
+    if time_of_day == "morning":
+        filtered = [(iso, d) for iso, d in filtered if d.hour < 12]
+    elif time_of_day == "afternoon":
+        filtered = [(iso, d) for iso, d in filtered if d.hour >= 12]
+
+    # Fall back to nearest available if the filter wiped everything out
+    exact_match = len(filtered) > 0
+    if not exact_match:
+        filtered = pairs
+
+    top3 = filtered[:3]
 
     return {
         "available": len(top3) > 0,
-        "slots": top3,
-        "spoken": _format_slots_for_speech(top3),
+        "exact_match": exact_match,
+        "slots": [iso for iso, d in top3],
+        "spoken": "; ".join(d.strftime("%A, %B %-d at %-I:%M %p") for iso, d in top3)
+            if top3 else "I don't have any open slots in that range.",
     }
 
 
