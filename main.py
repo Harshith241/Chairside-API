@@ -211,6 +211,23 @@ async def book(req: RetellFunctionCall):
 
     practice = get_practice(practice_id)
 
+    # Idempotency guard: if Retell retried (slow Cal.com response), don't double-book.
+    # Return the existing booking instead of hitting Cal.com again.
+    if practice:
+        try:
+            existing = supabase.table("bookings").select("*").eq(
+                "practice_id", practice["id"]
+            ).eq("appointment_datetime", start_utc).eq(
+                "patient_phone", patient_phone
+            ).execute()
+            if existing.data:
+                row = existing.data[0]
+                dt_phx = dt.astimezone(PHX)
+                when = dt_phx.strftime("%A, %B %-d at %-I:%M %p")
+                return {"success": True, "booking_id": str(row.get("cal_booking_id") or ""), "when": when}
+        except Exception as e:
+            print(f"WARNING: idempotency check failed, proceeding: {e}")
+
     payload = {
         "eventTypeId": CAL_EVENT_TYPE_ID,
         "start": start_utc,
